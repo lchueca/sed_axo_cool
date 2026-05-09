@@ -1,16 +1,21 @@
 #include <stdio.h>
 #include <math.h>
+#include <stdbool.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/queue.h"
+
+#include "driver/gpio.h"
+#include "esp_check.h"
 #include "esp_log.h"
+
 #include "ds18b20.h"
 #include "onewire_bus.h"
 
 static const char *TAG = "AXO_SENSOR";
 
-#define GPIO_DS18B20 GPIO_NUM_4
+#define GPIO_DS18B20 (GPIO_NUM_4)
 #define TEMP_UMBRAL_PELIGRO 25.0
 #define TEMP_UMBRAL_IDEAL 21.0
 
@@ -36,12 +41,12 @@ void app_main(void)
     onewire_bus_config_t bus_config = {
         .bus_gpio_num = GPIO_DS18B20};
     onewire_bus_rmt_config_t rmt_config = {
-        .max_rx_ns = 600,
-        .max_tx_ns = 600};
+        .max_rx_bytes = 10};
+
     ESP_ERROR_CHECK(onewire_new_bus_rmt(&bus_config, &rmt_config, &bus));
 
     // Tareas
-    xTaskCreate(sensor_task, "Ssensor_task", 4096, (void *)bus, 5, NULL);
+    xTaskCreate(sensor_task, "sensor_task", 4096, (void *)bus, 5, NULL);
     xTaskCreate(logic_task, "logic_task", 4096, NULL, 5, NULL);
 }
 
@@ -57,7 +62,7 @@ void sensor_task(void *pvParameters)
 
     if (onewire_device_iter_get_next(iter, &next_device) == ESP_OK)
     {
-        ds18b20_new_device(&next_device, &ds_config, &sensor);
+        ESP_ERROR_CHECK(ds18b20_new_device_from_enumeration(&next_device, &ds_config, &sensor));
         ESP_LOGI(TAG, "Sensor found and initialized");
     }
     onewire_del_device_iter(iter);
