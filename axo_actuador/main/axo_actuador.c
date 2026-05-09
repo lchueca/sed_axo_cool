@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <math.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,7 +17,7 @@
 static const char *TAG = "AXO_ACTUADOR";
 
 // --- GLOBAL VARIABLES -- -
-static QueueHandle_t fan_speed_queue;
+static QueueHandle_t temp_data_queue;
 
 // --- HARDWARE CONFIGURATION ---
 #define FAN_PWM_GPIO 18
@@ -27,8 +28,13 @@ static QueueHandle_t fan_speed_queue;
 #define FAN_FREQ_HZ 25000               // 25kHz estándar ventiladores PC
 
 // --- MQTT CONFIGURATION ---
-#define TOPIC_STATUS "sed/G09/status"    // Para el LWT
-#define TOPIC_FAN "sed/G09/actuador/fan" // Para recibir órdenes
+#define TOPIC_STATUS "sed/G09/axo_cool/status"
+#define TOPIC_SENSOR_DATA "sed/G09/axo_cool/temp"
+
+// --- TEMPERATURE THRESHOLDS ---
+#define TEMP_UMBRAL_PELIGRO 25.0
+#define MARGEN 0.5
+#define TEMP_UMBRAL_IDEAL 23.0
 
 // --- FUNCTION PROTOTYPES ---
 void init_fan_pwm(void);
@@ -40,7 +46,8 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
 void app_main(void)
 {
-    ESP_LOGI(TAG, "Initiating AXO_ACTUADOR");
+    ESP_LOGI(TAG, "Initiating AXO_ACTUADOR...");
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -49,8 +56,8 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
-    fan_speed_queue = xQueueCreate(10, sizeof(int));
-    if (fan_speed_queue != NULL)
+    temp_data_queue = xQueueCreate(10, sizeof(float));
+    if (temp_data_queue != NULL)
     {
         xTaskCreate(actuator_task, "ACTUATOR_TASK", 4096, NULL, 5, NULL);
     }
@@ -59,7 +66,7 @@ void app_main(void)
     vTaskDelay(pdMS_TO_TICKS(5000));
     mqtt_app_start();
 
-    ESP_LOGI(TAG, "Sistema AXO_ACTUADOR iniciado completamente");
+    ESP_LOGI(TAG, "AXO_ACTUADOR system initialized.");
 }
 
 void init_fan_pwm(void)
@@ -94,17 +101,33 @@ void set_fan_speed(uint8_t percentage)
 
 void actuator_task(void *pvParameters)
 {
-    int received_speed = 0;
-    ESP_LOGI(TAG, "Actuator task started, waiting for fan speed commands...");
-
+    float current_temp = 0.0;
     init_fan_pwm();
 
     while (1)
     {
-        if (xQueueReceive(fan_speed_queue, &received_speed, portMAX_DELAY))
+        if (xQueueReceive(temp_data_queue, &current_temp, portMAX_DELAY))
         {
-            ESP_LOGI(TAG, "Dato extraído de la cola: Ajustando a %d%%", received_speed);
-            set_fan_speed((uint8_t)received_speed);
+            // 1. Estado REPOSO
+            if (current_temp < (TEMP_UMBRAL_IDEAL - MARGEN))
+            {
+                set_fan_speed(0);
+                ESP_LOGI(TAG, "Status: REST (%.2f C). Fan OFF.", current_temp);
+            }
+            // 2. Estado ENFRIANDO
+            else if (current_temp >= (TEMP_UMBRAL_IDEAL - MARGEN) && current_temp <= TEMP_UMBRAL_PELIGRO)
+            {
+                // Mapeo: de 22.5 a 25 grados -> de 20% a 80% de potencia
+                int power = 20 + (int)((current_temp - (TEMP_UMBRAL_IDEAL - MARGEN)) * 24);
+                set_fan_speed(power);
+                ESP_LOGI(TAG, "Status: COOLING (%.2f C). Power: %d%%.", current_temp, power);
+            }
+            // 3. Estado ALERTA
+            else if (current_temp > TEMP_UMBRAL_PELIGRO)
+            {
+                set_fan_speed(100);
+                ESP_LOGW(TAG, "¡ESTADO CRITIC! Axolot in danger (%.2f C). Power: 100%%.", current_temp);
+            }
         }
     }
 }
@@ -160,12 +183,12 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to Broker");
         esp_mqtt_client_publish(client, TOPIC_STATUS, "Online", 0, 1, 1);
-        esp_mqtt_client_subscribe(client, TOPIC_FAN, 0);
+        esp_mqtt_client_subscribe(client, TOPIC_SENSOR_DATA, 0);
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "Data received: %.*s", event->data_len, event->data);
         int speed = atoi(event->data);
-        xQueueSend(fan_speed_queue, &speed, 0);
+        xQueueSend(temp_data_queue, &speed, 0);
         break;
     default:
         break;
