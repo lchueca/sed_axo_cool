@@ -24,23 +24,53 @@ Sistema IoT distribuido para la monitorización y control climático de acuarios
 ## 3. Instrucciones de Compilación y Ejecución
 El proyecto utiliza configuraciones base en el archivo `sdkconfig.defaults`. 
 
-### 1. Configuración de Credenciales
+
+### 1. Preparación de Componentes Externos
+> IMPORTANTE: Antes de compilar, es obligatorio descargar el cliente de Mender, ya que no forma parte del núcleo de ESP-IDF. Desde la raíz del proyecto, ejecuta:
+
+``` sh
+# 1. Crear el directorio de componentes externos en cada nodo
+mkdir -p external/mender-mcu-client
+
+# 2. Clonar el repositorio del cliente Mender (Versión específica)
+git clone --branch 0.12.3 --recursive https://github.com/joelguittet/mender-mcu-client.git external/mender-mcu-client/
+```
+
+### 2. Configuración de Credenciales
 Para configurar los datos de red sin modificar el código fuente, crea un archivo llamado `sdkconfig.local` en la raíz de la carpeta de cada nodo con la siguiente estructura:
 
 ```text
 CONFIG_ESP_WIFI_SSID="Nombre_Tu_Wifi"
 CONFIG_ESP_WIFI_PASSWORD="Password_Tu_Wifi"
+
 # Broker para entorno de desarrollo o laboratorio
 CONFIG_BROKER_URL="mqtt://broker.emqx.io"
+
+# Configuración de Mender
+CONFIG_MENDER_SERVER_HOST="https://IP_DE_TU_PORTATIL"
 ```
 
-También puedes hacerlo desde `idf.py menuconfig` en `Example Configuration`
+También puedes hacerlo desde `idf.py menuconfig` en `Example Configuration` 
 
-### 2. Compilación y Flasheo: 
+### 3. Compilación y Flasheo: 
 Dado que los nodos residen en directorios independientes, sitúate en la carpeta del firmware correspondiente y ejecuta:
 ``` sh
 # Sustituye X por el número de puerto serie (ej: USB0)
 idf.py -p /dev/ttyUSBX flash monitor
+```
+
+### 4. Generación de Artefactos OTA
+Para desplegar una nueva versión una vez que el dispositivo esté aceptado en el panel de Mender:
+
+1. Incrementa el #define VERSION en el código.
+2. Compila con idf.py build.
+3. Genera el artefacto .mender para subir a la web:
+``` sh
+mender-artifact write rootfs-image \
+  --device-type esp32 \
+  --artifact-name 1.0.1 \
+  --file build/p4.1.bin \
+  --output-path update_v1.0.1.mender
 ```
 
 ## 4. Resiliencia y Supervivencia (Fail-safe)
