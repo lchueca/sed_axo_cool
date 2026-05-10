@@ -19,6 +19,8 @@ static const char *TAG = "AXO_ACTUADOR";
 // --- GLOBAL VARIABLES -- -
 static QueueHandle_t temp_data_queue;
 static esp_mqtt_client_handle_t mqtt_client;
+static bool is_mqtt_connected = false;
+static int red_led_blink_state = 0;
 
 // --- HARDWARE CONFIGURATION ---
 #define FAN_PWM_GPIO 18
@@ -27,10 +29,14 @@ static esp_mqtt_client_handle_t mqtt_client;
 #define LEDC_CHANNEL LEDC_CHANNEL_0
 #define LEDC_DUTY_RES LEDC_TIMER_10_BIT // Resolución 0 a 1023
 #define FAN_FREQ_HZ 25000               // 25kHz estándar ventiladores PC
+#define LED_RED 25
+#define LED_YELLOW 26
+#define LED_GREEN 27
 
 // --- MQTT CONFIGURATION ---
 #define TOPIC_STATUS "sed/G09/axo_cool/status"
 #define TOPIC_SENSOR_DATA "sed/G09/axo_cool/temp"
+#define TOPIC_FEEDBACK "sed/G09/axo_cool/feedback"
 
 // --- TEMPERATURE THRESHOLDS ---
 #define TEMP_UMBRAL_PELIGRO 25.0
@@ -45,6 +51,8 @@ void wifi_init_sta(void);
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static esp_mqtt_client_handle_t mqtt_app_start(void);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
+void init_leds(void);
+void set_led_state(int r, int y, int g);
 
 void app_main(void)
 {
@@ -104,31 +112,65 @@ void set_fan_speed(uint8_t percentage)
 void actuator_task(void *pvParameters)
 {
     float current_temp = 0.0;
+    int missing_data_count = 0;
     init_fan_pwm();
+    init_leds();
 
     while (1)
     {
-        if (xQueueReceive(temp_data_queue, &current_temp, portMAX_DELAY))
+        if (xQueueReceive(temp_data_queue, &current_temp, pdMS_TO_TICKS(500)))
         {
+            int power = 0;
+            missing_data_count = 0;
+
             // 1. Estado REPOSO
             if (current_temp < (TEMP_UMBRAL_IDEAL - MARGEN))
             {
-                set_fan_speed(0);
+                power = 0;
+                set_led_state(0, 0, 1);
                 ESP_LOGI(TAG, "Status: REST (%.2f C). Fan OFF.", current_temp);
             }
             // 2. Estado ENFRIANDO
             else if (current_temp >= (TEMP_UMBRAL_IDEAL - MARGEN) && current_temp <= TEMP_UMBRAL_PELIGRO)
             {
-                // Mapeo: de 22.5 a 25 grados -> de 20% a 80% de potencia
-                int power = 20 + (int)((current_temp - (TEMP_UMBRAL_IDEAL - MARGEN)) * 24);
-                set_fan_speed(power);
+                power = 20 + (int)((current_temp - (TEMP_UMBRAL_IDEAL - MARGEN)) * 24);
+                set_led_state(0, 1, 0);
                 ESP_LOGI(TAG, "Status: COOLING (%.2f C). Power: %d%%.", current_temp, power);
             }
             // 3. Estado ALERTA
             else if (current_temp > TEMP_UMBRAL_PELIGRO)
             {
+                power = 100;
+                set_led_state(1, 0, 0);
+                ESP_LOGW(TAG, "¡Status: DANGER! Axolot in danger (%.2f C). Power: 100%%.", current_temp);
+            }
+            set_fan_speed(power);
+
+            if (is_mqtt_connected)
+            {
+                char feedback[80];
+                snprintf(feedback, sizeof(feedback), "{\"temp\": %.2f, \"pw\": %d, \"status\": \"OK\"}", current_temp, power);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_FEEDBACK, feedback, 0, 1, 0);
+            }
+        }
+        else
+        {
+            missing_data_count++;
+            if (missing_data_count >= 10)
+            {
+
                 set_fan_speed(100);
-                ESP_LOGW(TAG, "¡ESTADO CRITIC! Axolot in danger (%.2f C). Power: 100%%.", current_temp);
+                red_led_blink_state = !red_led_blink_state;
+                set_led_state(red_led_blink_state, 0, 0);
+
+                if (missing_data_count % 20 == 0)
+                {
+                    ESP_LOGE(TAG, "¡TIMEOUT! No data from sensor. Fan at 100%% for safety.");
+                    if (is_mqtt_connected)
+                    {
+                        esp_mqtt_client_publish(mqtt_client, TOPIC_FEEDBACK, "{\"status\": \"SENSOR_LOST\"}", 0, 1, 0);
+                    }
+                }
             }
         }
     }
@@ -204,6 +246,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
     {
     case MQTT_EVENT_CONNECTED:
         ESP_LOGI(TAG, "Connected to Broker");
+        is_mqtt_connected = true;
         esp_mqtt_client_publish(client, TOPIC_STATUS, "Online", 0, 1, 1);
         esp_mqtt_client_subscribe(client, TOPIC_SENSOR_DATA, 0);
         break;
@@ -218,8 +261,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "MQTT disconnected. Attempting to reconnect...");
+        is_mqtt_connected = false;
         break;
     default:
         break;
     }
+}
+
+void init_leds(void)
+{
+    gpio_reset_pin(LED_RED);
+    gpio_reset_pin(LED_YELLOW);
+    gpio_reset_pin(LED_GREEN);
+    gpio_set_direction(LED_RED, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_YELLOW, GPIO_MODE_OUTPUT);
+    gpio_set_direction(LED_GREEN, GPIO_MODE_OUTPUT);
+}
+
+void set_led_state(int r, int y, int g)
+{
+    gpio_set_level(LED_RED, r);
+    gpio_set_level(LED_YELLOW, y);
+    gpio_set_level(LED_GREEN, g);
 }
