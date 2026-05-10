@@ -128,6 +128,33 @@
         "groupType": "default"
     },
     {
+        "id": "0cc9e9343a801b85",
+        "type": "telegram bot",
+        "botname": "Axocool_monitor_bot",
+        "usernames": "",
+        "chatids": "1673288637",
+        "baseapiurl": "",
+        "testenvironment": false,
+        "updatemode": "polling",
+        "pollinterval": 300,
+        "usesocks": false,
+        "sockshost": "",
+        "socksprotocol": "socks5",
+        "socksport": 6667,
+        "socksusername": "anonymous",
+        "sockspassword": "",
+        "bothost": "",
+        "botpath": "",
+        "localbothost": "0.0.0.0",
+        "localbotport": 8443,
+        "publicbotport": 8443,
+        "privatekey": "",
+        "certificate": "",
+        "useselfsignedcertificate": false,
+        "sslterminated": false,
+        "verboselogging": false
+    },
+    {
         "id": "2ea41277d935a5f6",
         "type": "mqtt in",
         "z": "95ab57fded601097",
@@ -144,8 +171,7 @@
         "y": 120,
         "wires": [
             [
-                "b9e56ec756f24f61",
-                "eab8e1fc12789b29"
+                "b9e56ec756f24f61"
             ]
         ]
     },
@@ -220,7 +246,8 @@
         "wires": [
             [
                 "4fce6ab48066282a",
-                "1ff2144e6088e05b"
+                "1ff2144e6088e05b",
+                "eab8e1fc12789b29"
             ],
             [
                 "e1ebd20629a123af"
@@ -375,7 +402,7 @@
         "type": "switch",
         "z": "95ab57fded601097",
         "name": "Alarma > 25",
-        "property": "payload.temp",
+        "property": "payload",
         "propertyType": "msg",
         "rules": [
             {
@@ -387,11 +414,11 @@
         "checkall": "true",
         "repair": false,
         "outputs": 1,
-        "x": 430,
-        "y": 340,
+        "x": 350,
+        "y": 400,
         "wires": [
             [
-                "2bcf46e90ac86c90"
+                "f8df206a05cdf4eb"
             ]
         ]
     },
@@ -403,13 +430,13 @@
         "active": true,
         "tosidebar": true,
         "console": true,
-        "tostatus": false,
+        "tostatus": true,
         "complete": "payload",
         "targetType": "msg",
-        "statusVal": "",
+        "statusVal": "payload",
         "statusType": "auto",
-        "x": 590,
-        "y": 460,
+        "x": 1110,
+        "y": 560,
         "wires": []
     },
     {
@@ -434,11 +461,73 @@
         ]
     },
     {
-        "id": "b5ad5486bf1c76e0",
+        "id": "f8df206a05cdf4eb",
+        "type": "delay",
+        "z": "95ab57fded601097",
+        "name": "",
+        "pauseType": "rate",
+        "timeout": "1",
+        "timeoutUnits": "minutes",
+        "rate": "1",
+        "nbRateUnits": "2",
+        "rateUnits": "minute",
+        "randomFirst": "1",
+        "randomLast": "5",
+        "randomUnits": "seconds",
+        "drop": true,
+        "allowrate": false,
+        "outputs": 1,
+        "x": 580,
+        "y": 400,
+        "wires": [
+            [
+                "9390c02fabcbbaf8"
+            ]
+        ]
+    },
+    {
+        "id": "9390c02fabcbbaf8",
+        "type": "function",
+        "z": "95ab57fded601097",
+        "name": "Telegram Chat",
+        "func": "msg.payload = {\n    chatId: 1673288637, \n    type: 'message',\n    content: '⚠️ ALERTA AXO-COOL [G09]\\nTemperatura: ' + msg.payload + '°C\\nIniciando enfriamiento de emergencia.'\n};\nreturn msg;",
+        "outputs": 1,
+        "timeout": 0,
+        "noerr": 0,
+        "initialize": "",
+        "finalize": "",
+        "libs": [],
+        "x": 780,
+        "y": 400,
+        "wires": [
+            [
+                "0cf20faac09cc458"
+            ]
+        ]
+    },
+    {
+        "id": "0cf20faac09cc458",
+        "type": "telegram sender",
+        "z": "95ab57fded601097",
+        "name": "",
+        "bot": "0cc9e9343a801b85",
+        "haserroroutput": false,
+        "outputs": 1,
+        "x": 1010,
+        "y": 400,
+        "wires": [
+            [
+                "2bcf46e90ac86c90"
+            ]
+        ]
+    },
+    {
+        "id": "b9fedb4a60a3b446",
         "type": "global-config",
         "env": [],
         "modules": {
-            "@flowfuse/node-red-dashboard": "1.30.2"
+            "@flowfuse/node-red-dashboard": "1.30.2",
+            "node-red-contrib-telegrambot": "17.1.3"
         }
     }
 ]
