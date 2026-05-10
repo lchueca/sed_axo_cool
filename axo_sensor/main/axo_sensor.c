@@ -66,16 +66,8 @@ void app_main(void)
 
     sensor_data_queue = xQueueCreate(5, sizeof(sensor_data_t));
 
-    // Configuración del bus OneWire
-    onewire_bus_handle_t bus = NULL;
-    onewire_bus_config_t bus_config = {
-        .bus_gpio_num = GPIO_DS18B20};
-    onewire_bus_rmt_config_t rmt_config = {
-        .max_rx_bytes = 10};
-    ESP_ERROR_CHECK(onewire_new_bus_rmt(&bus_config, &rmt_config, &bus));
-
     // Tareas
-    xTaskCreate(sensor_task, "sensor_task", 4096, (void *)bus, 5, NULL);
+    xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 5, NULL);
     xTaskCreate(mqtt_publish_task, "mqtt_task", 4096, NULL, 5, NULL);
 
     ESP_LOGI(TAG, "AXO_SENSOR system initialized.");
@@ -83,48 +75,82 @@ void app_main(void)
 
 void sensor_task(void *pvParameters)
 {
-    onewire_bus_handle_t bus = (onewire_bus_handle_t)pvParameters;
+
+    // Configuración del bus OneWire
+    onewire_bus_handle_t bus = NULL;
     ds18b20_device_handle_t sensor = NULL;
+    onewire_bus_config_t bus_config = {.bus_gpio_num = GPIO_DS18B20};
+    onewire_bus_rmt_config_t rmt_config = {.max_rx_bytes = 10};
     ds18b20_config_t ds_config = {};
-
-    onewire_device_iter_handle_t iter = NULL;
-    onewire_device_t next_device;
-    onewire_new_device_iter(bus, &iter);
-
-    if (onewire_device_iter_get_next(iter, &next_device) == ESP_OK)
-    {
-        ESP_ERROR_CHECK(ds18b20_new_device_from_enumeration(&next_device, &ds_config, &sensor));
-        ESP_LOGI(TAG, "Sensor found and initialized");
-    }
-    onewire_del_device_iter(iter);
-
     sensor_data_t data_read;
 
     while (1)
     {
-        if (sensor && ds18b20_trigger_temperature_conversion(sensor) == ESP_OK)
+        // 1. Si el bus es NULL, recreamos de cero
+        if (bus == NULL)
         {
-            vTaskDelay(pdMS_TO_TICKS(800));
+            ESP_LOGW(TAG, "Resetting OneWire bus...");
+            gpio_reset_pin(GPIO_DS18B20);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            if (onewire_new_bus_rmt(&bus_config, &rmt_config, &bus) != ESP_OK)
+            {
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                continue;
+            }
+        }
 
-            if (ds18b20_get_temperature(sensor, &data_read.temp) == ESP_OK)
+        // 2. Si no hay sensor, buscamos sonda
+        if (sensor == NULL)
+        {
+            onewire_device_iter_handle_t iter = NULL;
+            onewire_device_t next_device;
+            onewire_new_device_iter(bus, &iter);
+            if (onewire_device_iter_get_next(iter, &next_device) == ESP_OK)
             {
-                data_read.valid = true;
-                ESP_LOGI(TAG, "Temperature read: %.2f°C", data_read.temp);
+                if (ds18b20_new_device_from_enumeration(&next_device, &ds_config, &sensor) == ESP_OK)
+                {
+                    ESP_LOGI(TAG, "¡Sensor recovered!");
+                }
             }
-            else
+            onewire_del_device_iter(iter);
+        }
+
+        // 3. Intento de lectura
+        if (sensor != NULL)
+        {
+            if (ds18b20_trigger_temperature_conversion(sensor) == ESP_OK)
             {
-                data_read.valid = false;
-                ESP_LOGE(TAG, "Failed to read temperature");
+                vTaskDelay(pdMS_TO_TICKS(800));
+                if (ds18b20_get_temperature(sensor, &data_read.temp) == ESP_OK)
+                {
+                    data_read.valid = true;
+                    ESP_LOGI(TAG, "Reading: %.2f C", data_read.temp);
+                    xQueueSend(sensor_data_queue, &data_read, 0);
+                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    continue;
+                }
             }
+            // SI FALLA ALGO
+            ESP_LOGE(TAG, "Detected failure. Purging peripherals...");
+            ds18b20_del_device(sensor);
+            sensor = NULL;
+            onewire_bus_del(bus);
+            bus = NULL;
+
+            vTaskDelay(pdMS_TO_TICKS(1000));
         }
         else
         {
+            if (bus)
+            {
+                onewire_bus_del(bus);
+                bus = NULL;
+            }
             data_read.valid = false;
-            ESP_LOGE(TAG, "Sensor not detected or failed to trigger conversion");
+            xQueueSend(sensor_data_queue, &data_read, 0);
+            ESP_LOGW(TAG, "Searching for sensor...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
         }
-
-        xQueueSend(sensor_data_queue, &data_read, pdMS_TO_TICKS(10));
-        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 

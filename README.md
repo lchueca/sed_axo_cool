@@ -1,45 +1,63 @@
-# AXO-COOL: Gestión Térmica Distribuida para Ajolotes
+# AXO-COOL: Gestión Térmica Distribuida [G09]
 
-## 1. Descripción del Proyecto
-**AXO-COOL** es un sistema IoT diseñado para la monitorización y regulación térmica de acuarios de ajolotes (*Ambystoma mexicanum*). Dado que esta especie es extremadamente sensible al calor (requiere < 21°C y entra en estado crítico a los 25°C), el sistema utiliza una arquitectura distribuida para enfriar el agua mediante evaporación forzada de forma automática.
+## 1. Resumen
+Sistema IoT distribuido para la monitorización y control climático de acuarios de ajolotes. El sistema garantiza que la temperatura no exceda los **25°C** mediante una arquitectura de sensores y actuadores comunicados por MQTT.
 
-## 2. Especificaciones de Hardware (Fase 1)
+## 2. Especificaciones de Hardware
+| Componente | Función | Pin (GPIO) | Protocolo / Señal |
+| :--- | :--- | :--- | :--- |
+| **ESP32 v1** | Nodo Sensor | - | Publisher (WiFi/MQTT) |
+| **DS18B20** | Sonda Térmica | **GPIO 4** | OneWire |
+| **ESP32 v4** | Nodo Actuador | - | Subscriber (WiFi/MQTT) |
+| **Ventilador NZXT** | Enfriamiento | **GPIO 18** | PWM (25kHz) |
+| **LED Rojo** | Alerta Crítica | **GPIO 25** | Digital Out |
+| **LED Amarillo** | Enfriando | **GPIO 26** | Digital Out |
+| **LED Verde** | Estado Ideal | **GPIO 27** | Digital Out |
 
-El sistema consta de dos nodos ESP32 con configuraciones específicas de hardware:
+### Detalles de Electrónica y Protección
+* **Resistencias de Pull-up:** 
+    * **4.7kΩ** en la línea de datos del DS18B20 (GPIO 4) para permitir la comunicación OneWire.
+    * **1kΩ** en la línea PWM (GPIO 18) para asegurar un nivel lógico estable durante el arranque del SoC.
+* **Resistencias de Protección LED:** 
+    * Cada LED (Rojo, Amarillo y Verde) cuenta con una resistencia limitadora de **220Ω** en serie para proteger los puertos GPIO de sobrecorrientes.
 
-### Nodo Sensor (ESP32 v1)
-* **Sensor DS18B20:** Sonda digital sumergible de precisión.
-* **Resistencia de Pull-up (4.7kΩ):** Conectada entre VCC y la línea de datos (GPIO 4).
-    * **Justificación:** El protocolo OneWire es de tipo "open-drain", lo que significa que requiere una resistencia de pull-up para mantener la línea en estado lógico alto y permitir la comunicación bidireccional. Sin ella, el sensor no es detectable.
+## 3. Instrucciones de Compilación y Ejecución
+El proyecto utiliza configuraciones base en el archivo `sdkconfig.defaults`. 
 
-### Nodo Actuador (ESP32 v4)
-* **Ventilador NZXT (4 pines):** Ventilador de PC con control PWM integrado.
-    * **Simplificación de diseño:** Al utilizar un ventilador de 4 pines, el control de potencia (MOSFET) y la protección contra corrientes inversas (diodo) ya están integrados en la electrónica interna del ventilador. Esto permite el control directo desde la ESP32 (GPIO 18).
-* **Resistencia de Pull-up (1kΩ) en PWM:**
-    * **Justificación:** Garantiza un nivel lógico definido en la línea de control durante el arranque del microcontrolador. Esto evita ruidos eléctricos o arranques erráticos del ventilador antes de que el firmware tome el control del pin.
+### 1. Configuración de Credenciales
+Para configurar los datos de red sin modificar el código fuente, crea un archivo llamado `sdkconfig.local` en la raíz de la carpeta de cada nodo con la siguiente estructura:
 
-## 3. Arquitectura de Software y Conectividad (Fase 2)
+```text
+CONFIG_ESP_WIFI_SSID="Nombre_Tu_Wifi"
+CONFIG_ESP_WIFI_PASSWORD="Password_Tu_Wifi"
+# Broker para entorno de desarrollo o laboratorio
+CONFIG_BROKER_URL="mqtt://broker.emqx.io"
+```
 
-### Robustez y Supervivencia
-Para garantizar la seguridad del animal, el software implementa capas de protección ante fallos:
-* **Gestión de Reintentos:** Tanto el sensor como el actuador monitorizan el estado del Wi-Fi. Si la conexión se pierde, ejecutan una lógica de reconexión infinita sin bloquear las tareas críticas.
-* **Comunicación MQTT:** Uso del broker `broker.emqx.io` con mensajes de **Last Will (LWT)** para detectar la caída de los nodos en tiempo real.
-* **Tratamiento Seguro de Datos:** El actuador procesa los mensajes de red mediante buffers temporales para asegurar una conversión de `string` a `float` estable, evitando reinicios por memoria sucia.
+También puedes hacerlo desde `idf.py menuconfig` en `Example Configuration`
 
-### MQTT Topics
-| Topic | Descripción |
-| :--- | :--- |
-| `sed/G09/axo_cool/temp` | Telemetría de temperatura en tiempo real. |
-| `sed/G09/axo_cool/status` | Estado de salud de los nodos (Online/Offline). |
+### 2. Compilación y Flasheo: 
+Dado que los nodos residen en directorios independientes, sitúate en la carpeta del firmware correspondiente y ejecuta:
+``` sh
+# Sustituye X por el número de puerto serie (ej: USB0)
+idf.py -p /dev/ttyUSBX flash monitor
+```
 
-## 4. Instrucciones de Compilación y Ejecución
+## 4. Resiliencia y Supervivencia (Fail-safe)
+El sistema se pone en modo Alerta ante cualquier fallo de comunicación:
+* **Lógica de Seguridad (No Data):** Si el actuador no recibe lecturas del sensor durante 5 segundos (`missing_data_count >= 10`), el sistema entra en modo de emergencia: ventilador al **100% de potencia** y parpadeo de **LED Rojo**.
+* **Last Will and Testament (LWT):** El sistema registra un mensaje de "testamento" en el Broker. Si el nodo pierde la conexión, el Broker publica automáticamente el estado **"Offline"**, permitiendo que el Dashboard detecte la caída del hardware.
 
 
-## 5. Vídeo Demostrativo
-Acceso a la demostración visual del sistema, donde se observa la respuesta del hardware ante cambios térmicos y la estabilidad de la red distribuida:
+## 5. Dashboard (Node-RED)
+Interfaz visual para la supervisión técnica y el diagnóstico de salud del sistema en tiempo real:
+* **Telemetría:** Gauges de temperatura y potencia.
+* **Estado de Salud:** Indicadores dinámicos basados en la carga del JSON y el LWT: 
+    * `OK`: Funcionamiento normal.
+    * `SENSOR_LOST`: El nodo actuador está online pero no recibe datos del sensor.
+    * `OFFLINE`: El nodo actuador ha perdido la conexión con el Broker.
+**Histórico:** Gráfica de evolución térmica (Chart) para analizar la inercia térmica del acuario.
+* **Alertas:** Lógica `Switch` independiente para temperaturas críticas > 25°C, futura implementación de alertas por Telegram.
 
-**[ENLACE AL VÍDEO (YouTube/Drive)]**
-
----
-**Desarrollado por:** Laura Chueca Bronte [G09]  
-**Asignatura:** Sistemas Empotrados Distribuidos (SED)
+## 6. Vídeo Demostrativo
+**[ENLACE AL VÍDEO AQUÍ]**
