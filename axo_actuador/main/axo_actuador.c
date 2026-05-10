@@ -18,6 +18,7 @@ static const char *TAG = "AXO_ACTUADOR";
 
 // --- GLOBAL VARIABLES -- -
 static QueueHandle_t temp_data_queue;
+static esp_mqtt_client_handle_t mqtt_client;
 
 // --- HARDWARE CONFIGURATION ---
 #define FAN_PWM_GPIO 18
@@ -41,6 +42,7 @@ void init_fan_pwm(void);
 void set_fan_speed(uint8_t percentage);
 void actuator_task(void *pvParameters);
 void wifi_init_sta(void);
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
 static esp_mqtt_client_handle_t mqtt_app_start(void);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 
@@ -64,7 +66,7 @@ void app_main(void)
 
     wifi_init_sta();
     vTaskDelay(pdMS_TO_TICKS(5000));
-    mqtt_app_start();
+    mqtt_client = mqtt_app_start();
 
     ESP_LOGI(TAG, "AXO_ACTUADOR system initialized.");
 }
@@ -141,6 +143,9 @@ void wifi_init_sta(void)
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = CONFIG_ESP_WIFI_SSID,
@@ -151,7 +156,24 @@ void wifi_init_sta(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
-    esp_wifi_connect();
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        ESP_LOGW(TAG, "Lost connection. Retrying to connect to Wi-Fi...");
+        esp_wifi_connect();
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "IP Obtained: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
 }
 
 static esp_mqtt_client_handle_t mqtt_app_start(void)
@@ -193,6 +215,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
 
         float speed = atof(bf);
         xQueueSend(temp_data_queue, &speed, 0);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        ESP_LOGW(TAG, "MQTT disconnected. Attempting to reconnect...");
         break;
     default:
         break;
