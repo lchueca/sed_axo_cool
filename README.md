@@ -6,9 +6,9 @@ Sistema IoT distribuido para la monitorización y control climático de acuarios
 ## 2. Especificaciones de Hardware
 | Componente | Función | Pin (GPIO) | Protocolo / Señal |
 | :--- | :--- | :--- | :--- |
-| **ESP32 v1** | Nodo Sensor | - | Master (I2C/OneWire) |
+| **ESP32 v1** | Nodo Sensor | - | Publisher (WiFi/MQTT) |
 | **DS18B20** | Sonda Térmica | **GPIO 4** | OneWire |
-| **ESP32 v4** | Nodo Actuador | - | Slave (PWM) |
+| **ESP32 v4** | Nodo Actuador | - | Subscriber (WiFi/MQTT) |
 | **Ventilador NZXT** | Enfriamiento | **GPIO 18** | PWM (25kHz) |
 | **LED Rojo** | Alerta Crítica | **GPIO 25** | Digital Out |
 | **LED Amarillo** | Enfriando | **GPIO 26** | Digital Out |
