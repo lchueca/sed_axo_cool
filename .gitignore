@@ -4,6 +4,7 @@ dependencies.lock
 sdkconfig
 sdkconfig.old
 sdkconfig.local
+Kconfig.projbuild
 
 # Build directories
 build/

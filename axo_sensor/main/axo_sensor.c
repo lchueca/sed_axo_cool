@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <math.h>
 #include <stdbool.h>
+#include <string.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,11 +14,20 @@
 #include "ds18b20.h"
 #include "onewire_bus.h"
 
+#include "nvs_flash.h"
+#include "esp_wifi.h"
+#include "esp_event.h"
+#include "esp_netif.h"
+#include "mqtt_client.h"
+
 static const char *TAG = "AXO_SENSOR";
 
+// --- HARDWARE CONFIGURATION ---
 #define GPIO_DS18B20 (GPIO_NUM_4)
-#define TEMP_UMBRAL_PELIGRO 25.0
-#define TEMP_UMBRAL_IDEAL 21.0
+
+// --- MQTT CONFIGURATION ---
+#define TOPIC_STATUS "sed/G09/axo_cool/status"
+#define TOPIC_TEMP "sed/G09/axo_cool/temp"
 
 typedef struct
 {
@@ -25,15 +35,35 @@ typedef struct
     bool valid;
 } sensor_data_t;
 
+// --- GLOBAL VARIABLES ---
 QueueHandle_t sensor_data_queue;
+esp_mqtt_client_handle_t mqtt_client;
+bool is_mqtt_connected = false;
 
+// --- FUNCTION PROTOTYPES ---
 void sensor_task(void *pvParameters);
-void logic_task(void *pvParameters);
+void mqtt_publish_task(void *pvParameters);
+void wifi_init_sta(void);
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data);
+static esp_mqtt_client_handle_t mqtt_app_start(void);
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 
 void app_main(void)
 {
+    ESP_LOGI(TAG, "Initiating AXO_SENSOR");
 
-    // Cola para comunicación entre tareas
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    wifi_init_sta();
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    mqtt_client = mqtt_app_start();
+
     sensor_data_queue = xQueueCreate(5, sizeof(sensor_data_t));
 
     // Configuración del bus OneWire
@@ -42,12 +72,13 @@ void app_main(void)
         .bus_gpio_num = GPIO_DS18B20};
     onewire_bus_rmt_config_t rmt_config = {
         .max_rx_bytes = 10};
-
     ESP_ERROR_CHECK(onewire_new_bus_rmt(&bus_config, &rmt_config, &bus));
 
     // Tareas
     xTaskCreate(sensor_task, "sensor_task", 4096, (void *)bus, 5, NULL);
-    xTaskCreate(logic_task, "logic_task", 4096, NULL, 5, NULL);
+    xTaskCreate(mqtt_publish_task, "mqtt_task", 4096, NULL, 5, NULL);
+
+    ESP_LOGI(TAG, "AXO_SENSOR system initialized.");
 }
 
 void sensor_task(void *pvParameters)
@@ -93,36 +124,98 @@ void sensor_task(void *pvParameters)
         }
 
         xQueueSend(sensor_data_queue, &data_read, pdMS_TO_TICKS(10));
-        vTaskDelay(pdMS_TO_TICKS(2000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 
-void logic_task(void *pvParameters)
+void mqtt_publish_task(void *pvParameters)
 {
     sensor_data_t received_data;
-    float last_printed = 0;
+    char payload[16];
 
     while (1)
     {
         if (xQueueReceive(sensor_data_queue, &received_data, portMAX_DELAY))
         {
-
-            if (!received_data.valid)
+            if (received_data.valid && is_mqtt_connected)
             {
-                ESP_LOGE(TAG, "Received invalid temperature data");
-                continue;
-            }
-
-            if (fabsf(received_data.temp - last_printed) >= 0.5 || received_data.temp >= TEMP_UMBRAL_PELIGRO)
-            {
-                ESP_LOGI(TAG, "Temperature: %.2f °C", received_data.temp);
-                last_printed = received_data.temp;
-
-                if (received_data.temp >= TEMP_UMBRAL_PELIGRO)
-                {
-                    ESP_LOGW(TAG, "Danger! Temperature exceeds %.2f °C", TEMP_UMBRAL_PELIGRO);
-                }
+                snprintf(payload, sizeof(payload), "%.2f", received_data.temp);
+                esp_mqtt_client_publish(mqtt_client, TOPIC_TEMP, payload, 0, 1, 0);
+                ESP_LOGI(TAG, "MQTT publish: %s", payload);
             }
         }
+    }
+}
+
+void wifi_init_sta(void)
+{
+    esp_netif_init();
+    esp_event_loop_create_default();
+    esp_netif_create_default_wifi_sta();
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_wifi_init(&cfg);
+
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
+    wifi_config_t wifi_config = {
+        .sta = {
+            .ssid = CONFIG_ESP_WIFI_SSID,
+            .password = CONFIG_ESP_WIFI_PASSWORD,
+        },
+    };
+    esp_wifi_set_mode(WIFI_MODE_STA);
+    esp_wifi_set_config(WIFI_IF_STA, &wifi_config);
+    esp_wifi_start();
+}
+
+static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
+    {
+        esp_wifi_connect();
+    }
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
+    {
+        ESP_LOGW(TAG, "Lost connection. Retrying to connect to Wi-Fi...");
+        esp_wifi_connect();
+    }
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
+    {
+        ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
+        ESP_LOGI(TAG, "IP obtained: " IPSTR, IP2STR(&event->ip_info.ip));
+    }
+}
+
+static esp_mqtt_client_handle_t mqtt_app_start(void)
+{
+    esp_mqtt_client_config_t mqtt_cfg = {
+        .broker.address.uri = CONFIG_BROKER_URL,
+        .session.last_will = {
+            .topic = TOPIC_STATUS,
+            .msg = "Offline",
+            .qos = 1,
+            .retain = 1,
+        }};
+    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&mqtt_cfg);
+    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+    esp_mqtt_client_start(client);
+    return client;
+}
+
+static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data)
+{
+    switch ((esp_mqtt_event_id_t)event_id)
+    {
+    case MQTT_EVENT_CONNECTED:
+        ESP_LOGI(TAG, "Connected to Broker");
+        is_mqtt_connected = true;
+        esp_mqtt_client_publish(mqtt_client, TOPIC_STATUS, "Online", 0, 1, 1);
+        break;
+    case MQTT_EVENT_DISCONNECTED:
+        is_mqtt_connected = false;
+        ESP_LOGW(TAG, "Disconnected from MQTT Broker.");
+        break;
+    default:
+        break;
     }
 }
