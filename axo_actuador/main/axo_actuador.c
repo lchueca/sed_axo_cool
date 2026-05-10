@@ -14,9 +14,15 @@
 #include "esp_netif.h"
 #include "mqtt_client.h"
 
+#include "esp_ota_ops.h"
+#include "esp_mac.h"
+#include "mender-client.h"
+#include "mender-flash.h"
+
 static const char *TAG = "AXO_ACTUADOR";
 
 // --- GLOBAL VARIABLES -- -
+#define VERSION "1.0.0"
 static QueueHandle_t temp_data_queue;
 static esp_mqtt_client_handle_t mqtt_client;
 static bool is_mqtt_connected = false;
@@ -43,6 +49,12 @@ static int red_led_blink_state = 0;
 #define MARGEN 0.5
 #define TEMP_UMBRAL_IDEAL 23.0
 
+// --- MENDER CONFIGURATION ---
+mender_client_config_t mender_config;
+mender_client_callbacks_t mender_callbacks;
+mender_keystore_t mender_identity[2];
+char mender_mac_address[18];
+
 // --- FUNCTION PROTOTYPES ---
 void init_fan_pwm(void);
 void set_fan_speed(uint8_t percentage);
@@ -53,11 +65,40 @@ static esp_mqtt_client_handle_t mqtt_app_start(void);
 static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_t event_id, void *event_data);
 void init_leds(void);
 void set_led_state(int r, int y, int g);
+bool perform_health_check();
+void check_and_commit_ota();
 
+// --- CALLBACKS MENDER ---
+static mender_err_t mender_network_connect_cb(void) { return MENDER_OK; }
+static mender_err_t mender_network_release_cb(void) { return MENDER_OK; }
+static mender_err_t mender_auth_failure_cb(void) { return MENDER_OK; }
+static mender_err_t mender_deployment_status_cb(mender_deployment_status_t status, char *desc)
+{
+    ESP_LOGI("MENDER", "Estado del despliegue: %s", desc ? desc : "Desconocido");
+    return MENDER_OK;
+}
+static mender_err_t mender_auth_success_cb(void)
+{
+    return MENDER_OK;
+}
+static mender_err_t mender_restart_cb(void)
+{
+    ESP_LOGI("MENDER", "Reiniciando por petición de OTA...");
+    esp_restart();
+    return MENDER_OK;
+}
+
+// =====================================================================
+//                          MAIN APPLICATION
+// =====================================================================
 void app_main(void)
 {
     ESP_LOGI(TAG, "Initiating AXO_ACTUADOR...");
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    printf("Versión de Firmware: %s\n", VERSION);
+    ESP_LOGI(TAG, "Ejecutando desde partición: %s", running->label);
 
+    // Inicialización NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
     {
@@ -73,7 +114,37 @@ void app_main(void)
     }
 
     wifi_init_sta();
-    vTaskDelay(pdMS_TO_TICKS(5000));
+    // 1. ESPERA PARA SELF-TEST
+    vTaskDelay(pdMS_TO_TICKS(10000));
+    check_and_commit_ota();
+
+    // 2. CONFIGURACIÓN MENDER
+    uint8_t mac[6];
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    sprintf(mender_mac_address, "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+
+    mender_identity[0].name = "mac";
+    mender_identity[0].value = mender_mac_address;
+    mender_identity[1].name = NULL;
+
+    mender_config.identity = mender_identity;
+    mender_config.artifact_name = VERSION;
+    mender_config.device_type = "esp32";
+    mender_config.host = CONFIG_MENDER_SERVER_HOST; // URL del portátil
+    mender_config.authentication_poll_interval = 60;
+    mender_config.update_poll_interval = 60;
+
+    mender_callbacks.network_connect = mender_network_connect_cb;
+    mender_callbacks.authentication_success = mender_auth_success_cb;
+    mender_callbacks.deployment_status = mender_deployment_status_cb;
+    mender_callbacks.restart = mender_restart_cb;
+
+    if (mender_client_init(&mender_config, &mender_callbacks) == MENDER_OK)
+    {
+        mender_client_activate();
+    }
+
+    // 3. INICIO TAREAS SENSOR Y MQTT
     mqtt_client = mqtt_app_start();
 
     ESP_LOGI(TAG, "AXO_ACTUADOR system initialized.");
@@ -283,4 +354,39 @@ void set_led_state(int r, int y, int g)
     gpio_set_level(LED_RED, r);
     gpio_set_level(LED_YELLOW, y);
     gpio_set_level(LED_GREEN, g);
+}
+
+bool perform_health_check()
+{
+    wifi_ap_record_t ap_info;
+    if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK)
+    {
+        ESP_LOGI("HEALTH", "Conectado al AP con RSSI: %d", ap_info.rssi);
+        return true;
+    }
+    ESP_LOGE("HEALTH", "Fallo de conexión Wi-Fi.");
+    return false;
+}
+
+void check_and_commit_ota()
+{
+    esp_ota_img_states_t ota_state;
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK)
+    {
+        if (ota_state == ESP_OTA_IMG_PENDING_VERIFY)
+        {
+            ESP_LOGI("OTA", "Imagen en periodo de prueba. Iniciando auto-diagnóstico...");
+            if (perform_health_check())
+            {
+                ESP_LOGI("OTA", "Salud verificada. Marcando firmware como VÁLIDO.");
+                esp_ota_mark_app_valid_cancel_rollback(); //
+            }
+            else
+            {
+                ESP_LOGE("OTA", "Error en diagnóstico. Forzando Rollback...");
+                esp_ota_mark_app_invalid_rollback_and_reboot(); //
+            }
+        }
+    }
 }
