@@ -187,7 +187,11 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base, int32_
         break;
     case MQTT_EVENT_DATA:
         ESP_LOGI(TAG, "Data received: %.*s", event->data_len, event->data);
-        int speed = atoi(event->data);
+        char bf[16] = {0};
+        int len = (event->data_len < sizeof(bf) - 1) ? event->data_len : sizeof(bf) - 1;
+        memcpy(bf, event->data, len);
+
+        float speed = atof(bf);
         xQueueSend(temp_data_queue, &speed, 0);
         break;
     default:
