@@ -5,5 +5,7 @@ cmake_minimum_required(VERSION 3.16)
 # set(SDKCONFIG_DEFAULTS "../sdkconfig.defaults")
 set(SDKCONFIG_DEFAULTS "../sdkconfig.defaults;../sdkconfig.local")
 
+list(APPEND EXTRA_COMPONENT_DIRS "external/mender-mcu-client/esp-idf")
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(axo_sensor)
