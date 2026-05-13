@@ -90,4 +90,4 @@ Interfaz visual para la supervisión técnica y el diagnóstico de salud del sis
 * **Alertas:** Lógica `Switch` independiente para temperaturas críticas > 25°C, futura implementación de alertas por Telegram.
 
 ## 6. Vídeo Demostrativo
-**[ENLACE AL VÍDEO AQUÍ]**
+**[Link vídeo demostrativo](https://drive.google.com/file/d/1OkcP9L0U24dNBReip2bYV8LNu5w_a5Fa/view?usp=sharing)**
